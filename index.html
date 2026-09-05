@@ -186,6 +186,7 @@
   }
   .photo-add-btn:hover{border-color:var(--accent);color:var(--accent-ink);}
   .photo-add-btn .ic{width:15px;height:15px;}
+  .task-photo-wrap.needs-photo .photo-add-btn{border-color:var(--danger);color:var(--danger);border-style:solid;background:var(--danger-soft);}
   .task-photo-preview{position:relative;display:inline-block;}
   .task-photo-preview img{width:84px;height:84px;object-fit:cover;border-radius:8px;border:1px solid var(--border);display:block;}
   .photo-remove-btn{
@@ -303,12 +304,18 @@
   .pin-gate{max-width:340px;margin:60px auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;text-align:center;}
   .pin-gate .mark{width:48px;height:48px;border-radius:14px;background:var(--accent-soft);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;}
   .pin-gate .mark .ic{width:22px;height:22px;}
-  .pin-gate input{width:100%;text-align:center;letter-spacing:4px;font-size:20px;border:1px solid var(--border);border-radius:8px;padding:12px;margin:16px 0;background:var(--bg);}
+  .pin-gate > input{width:100%;text-align:center;letter-spacing:4px;font-size:20px;border:1px solid var(--border);border-radius:8px;padding:12px;margin:16px 0;background:var(--bg);}
   .pin-error{color:var(--danger);font-size:13px;min-height:18px;}
 
   .settings-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 0;border-top:1px solid var(--border);}
   .settings-row:first-child{border-top:none;}
   .settings-row input{border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:14px;width:120px;text-align:center;}
+
+  .user-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid var(--border);flex-wrap:wrap;}
+  .user-row:first-child{border-top:none;}
+  .user-row-name{font-weight:800;font-size:14.5px;}
+  .user-row-actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .admin-tag{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);font-size:11px;font-weight:800;padding:2px 9px;border-radius:999px;margin-right:6px;}
 
   .storage-note{
     display:flex;gap:10px;align-items:flex-start;
@@ -337,7 +344,7 @@
       <span class="sub">سجلّ الشِّفت — تقييم الأداء اليومي</span>
     </div>
   </div>
-  <button class="menu-btn" id="menuToggle" aria-label="القائمة">
+  <button class="menu-btn" id="menuToggle" aria-label="القائمة" style="display:none;">
     <svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
   </button>
 </div>
@@ -366,6 +373,7 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script>
 (function(){
   "use strict";
@@ -413,16 +421,68 @@
   };
 
   let db = null;
+  let auth = null;
   let usingFallback = true;
   try{
     if(typeof firebase !== "undefined"){
       firebase.initializeApp(firebaseConfig);
       db = firebase.firestore();
+      auth = firebase.auth();
       usingFallback = false;
     }
   }catch(e){ usingFallback = true; }
 
   function nsKey(key){ return "phshift::" + key; }
+
+  /* ================= Authentication ================= */
+  function usernameToEmail(username){
+    const clean = username.trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "");
+    return clean + "@zamzam.local";
+  }
+
+  async function fetchUserProfile(uid){
+    try{
+      const snap = await withTimeout(db.collection("users").doc(uid).get(), 6000);
+      return snap.exists ? snap.data() : null;
+    }catch(e){ return null; }
+  }
+
+  async function signUpUser(username, password){
+    const clean = username.trim();
+    if(clean.length < 2) throw new Error("اسم المستخدم قصير جدًا");
+    const email = usernameToEmail(clean);
+    const cred = await auth.createUserWithEmailAndPassword(email, password);
+    const uid = cred.user.uid;
+    await db.collection("users").doc(uid).set({ username: clean, status: "pending", createdAt: Date.now() });
+    let becameAdmin = false;
+    try{
+      await db.collection("config").doc("admin").set({ uid });
+      becameAdmin = true;
+    }catch(e){ becameAdmin = false; }
+    if(becameAdmin){
+      await db.collection("users").doc(uid).update({ status: "approved", isAdmin: true });
+    }
+    return becameAdmin;
+  }
+
+  async function signInUser(username, password){
+    const email = usernameToEmail(username.trim());
+    await auth.signInWithEmailAndPassword(email, password);
+  }
+
+  async function signOutUser(){
+    await auth.signOut();
+  }
+
+  async function listAllUsers(){
+    const snap = await withTimeout(db.collection("users").get(), 6000);
+    return snap.docs.map(d=>({ id:d.id, data:d.data() }));
+  }
+
+  async function setUserStatus(uid, status){
+    await db.collection("users").doc(uid).update({ status });
+  }
+
 
   const localAdapter = {
     getConfig(){
@@ -595,9 +655,14 @@
   /* ---------------- App state ---------------- */
   let config = null;
   let activeMainTab = "submit";
-  let dashboardUnlocked = false;
   let activeSubTab = "tasks";
   let evalCache = [];
+
+  let authUser = null;      // firebase auth user object, or null
+  let authProfile = null;   // {username, status, isAdmin} from /users/{uid}, or null
+  let authScreenMode = "login"; // "login" | "signup"
+  let authReady = false;    // becomes true once the first onAuthStateChanged fires
+  let usersCache = [];      // cached /users docs for the admin approval screen
 
   const view = document.getElementById("view");
   const toastEl = document.getElementById("toast");
@@ -847,6 +912,7 @@
         if(!file) return;
         try{
           state.photo = await compressImage(file);
+          wrapEl.classList.remove("needs-photo");
           bindPhotoWrap(wrapEl, state);
         }catch(err){
           toast("تعذّر تحميل الصورة، حاول مرة أخرى", true);
@@ -953,13 +1019,13 @@
 
   /* ---------------- Dashboard ---------------- */
   function renderDashboard(){
-    if(!dashboardUnlocked){ renderPinGate(); return; }
+    if(!authProfile || !authProfile.isAdmin){ renderNotAuthorized(); return; }
     view.innerHTML = `
       ${storageNoteHtml()}
       <div class="subtabs" id="subtabs">
         <button data-sub="tasks" class="${activeSubTab==='tasks'?'active':''}">${ICONS.list} تعديل المهام</button>
         <button data-sub="evaluations" class="${activeSubTab==='evaluations'?'active':''}">${ICONS.clipboard} مراجعة التقييمات</button>
-        <button data-sub="settings" class="${activeSubTab==='settings'?'active':''}">${ICONS.settings} الإعدادات</button>
+        <button data-sub="users" class="${activeSubTab==='users'?'active':''}">${ICONS.settings} طلبات الانضمام</button>
       </div>
       <div id="sub-content"></div>
     `;
@@ -969,50 +1035,81 @@
     const c = document.getElementById("sub-content");
     if(activeSubTab === "tasks") renderTasksEditor(c);
     else if(activeSubTab === "evaluations") renderEvaluationsReview(c);
-    else renderSettings(c);
+    else renderUsersAdmin(c);
   }
 
-  function renderPinGate(){
+  function renderNotAuthorized(){
     view.innerHTML = `
       <div class="pin-gate">
         <div class="mark">${ICONS.lock}</div>
-        <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">دخول لوحة التحكم</h2>
-        <p style="color:var(--muted);font-size:13.5px;margin:0;">أدخل الرمز الخاص بالمسؤول</p>
-        <input type="password" id="pin-input" maxlength="8" placeholder="••••">
-        <div class="pin-error" id="pin-error"></div>
-        <button class="btn btn-primary" id="pin-submit" style="width:100%;justify-content:center;">دخول</button>
+        <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">هذه الصفحة للمدير فقط</h2>
+        <p style="color:var(--muted);font-size:13.5px;margin:0;">حسابك مش عنده صلاحية الدخول للوحة التحكم.</p>
       </div>
     `;
-    const input = document.getElementById("pin-input");
-    input.focus();
-    const tryUnlock = ()=>{
-      if(input.value === config.adminPin){ dashboardUnlocked = true; renderDashboard(); }
-      else{ document.getElementById("pin-error").textContent = "الرمز غير صحيح"; }
-    };
-    document.getElementById("pin-submit").addEventListener("click", tryUnlock);
-    input.addEventListener("keydown", e=>{ if(e.key==="Enter") tryUnlock(); });
   }
 
-  function renderSettings(container){
+  async function renderUsersAdmin(container){
+    container.innerHTML = `<div class="empty-state"><p>جارٍ تحميل الطلبات...</p></div>`;
+    try{ usersCache = await listAllUsers(); }
+    catch(e){ container.innerHTML = `<div class="empty-state"><p>تعذّر تحميل المستخدمين. حاول تحديث الصفحة.</p></div>`; return; }
+    drawUsersAdmin(container);
+  }
+
+  function drawUsersAdmin(container){
+    const pending = usersCache.filter(u=>u.data.status==="pending");
+    const approved = usersCache.filter(u=>u.data.status==="approved");
+    const rejected = usersCache.filter(u=>u.data.status==="rejected");
+
+    function userRow(u, actions){
+      return `
+        <div class="user-row" data-uid="${u.id}">
+          <div class="user-row-name">${escapeHtml(u.data.username||"—")}${u.data.isAdmin?' <span class="admin-tag">مدير</span>':''}</div>
+          <div class="user-row-actions">${actions}</div>
+        </div>
+      `;
+    }
+
     container.innerHTML = `
       <div class="label-card"><div class="tag-edge"></div><div class="body">
-        <h3 class="section-title"><span class="icon-badge">${ICONS.lock}</span> رمز الدخول للوحة التحكم</h3>
-        <p class="section-hint">هذا الرمز يُطلب من أي شخص يريد فتح لوحة التحكم.</p>
-        <div class="settings-row">
-          <span>الرمز الحالي</span>
-          <input type="text" id="pin-setting" value="${escapeHtml(config.adminPin)}" maxlength="8">
-        </div>
-        <div class="submit-bar" style="margin-top:16px;">
-          <button class="btn btn-primary" id="save-pin">${ICONS.check} حفظ الرمز</button>
-        </div>
+        <h3 class="section-title"><span class="icon-badge">${ICONS.clipboard}</span> طلبات في انتظار الموافقة</h3>
+        ${pending.length===0 ? `<p class="section-hint" style="padding-right:0;">لا توجد طلبات جديدة.</p>` :
+          pending.map(u=>userRow(u, `
+            <button class="btn btn-primary btn-small" data-approve="${u.id}">${ICONS.check} موافقة</button>
+            <button class="btn btn-danger-outline btn-small" data-reject="${u.id}">${ICONS.close} رفض</button>
+          `)).join("")}
       </div></div>
+
+      <div class="label-card"><div class="tag-edge"></div><div class="body">
+        <h3 class="section-title"><span class="icon-badge">${ICONS.checkCircle}</span> الموظفون المعتمدون</h3>
+        ${approved.length===0 ? `<p class="section-hint" style="padding-right:0;">لا يوجد موظفون معتمدون بعد.</p>` :
+          approved.map(u=>userRow(u, u.data.isAdmin ? `` : `<button class="btn btn-danger-outline btn-small" data-revoke="${u.id}">${ICONS.trash} إلغاء الصلاحية</button>`)).join("")}
+      </div></div>
+
+      ${rejected.length ? `
+      <div class="label-card"><div class="tag-edge"></div><div class="body">
+        <h3 class="section-title"><span class="icon-badge">${ICONS.xCircle}</span> طلبات مرفوضة</h3>
+        ${rejected.map(u=>userRow(u, `<button class="btn btn-primary btn-small" data-approve="${u.id}">${ICONS.check} موافقة</button>`)).join("")}
+      </div></div>` : ``}
     `;
-    document.getElementById("save-pin").addEventListener("click", async ()=>{
-      const val = document.getElementById("pin-setting").value.trim();
-      if(!val){ toast("اكتب رمزًا صالحًا", true); return; }
-      config.adminPin = val;
-      await saveConfig(config);
-      toast("تم تحديث الرمز");
+
+    container.querySelectorAll("[data-approve]").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        try{ await setUserStatus(btn.getAttribute("data-approve"), "approved"); toast("تمت الموافقة على الحساب"); renderUsersAdmin(container); }
+        catch(e){ toast("تعذّر تنفيذ العملية", true); }
+      });
+    });
+    container.querySelectorAll("[data-reject]").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        try{ await setUserStatus(btn.getAttribute("data-reject"), "rejected"); toast("تم رفض الطلب"); renderUsersAdmin(container); }
+        catch(e){ toast("تعذّر تنفيذ العملية", true); }
+      });
+    });
+    container.querySelectorAll("[data-revoke]").forEach(btn=>{
+      btn.addEventListener("click", async ()=>{
+        if(!confirm("هل تريد إلغاء صلاحية دخول هذا الموظف؟")) return;
+        try{ await setUserStatus(btn.getAttribute("data-revoke"), "pending"); toast("تم إلغاء الصلاحية، الحساب محتاج موافقة جديدة"); renderUsersAdmin(container); }
+        catch(e){ toast("تعذّر تنفيذ العملية", true); }
+      });
     });
   }
 
@@ -1328,11 +1425,12 @@
   /* ---------------- Sidebar / main navigation ---------------- */
   const sidebarEl = document.getElementById("sidebar");
   const sidebarBackdrop = document.getElementById("sidebarBackdrop");
+  const menuToggleBtn = document.getElementById("menuToggle");
 
   function openSidebar(){ sidebarEl.classList.add("open"); sidebarBackdrop.classList.add("show"); }
   function closeSidebar(){ sidebarEl.classList.remove("open"); sidebarBackdrop.classList.remove("show"); }
 
-  document.getElementById("menuToggle").addEventListener("click", openSidebar);
+  menuToggleBtn.addEventListener("click", openSidebar);
   document.getElementById("sidebarClose").addEventListener("click", closeSidebar);
   sidebarBackdrop.addEventListener("click", closeSidebar);
 
@@ -1340,19 +1438,174 @@
     const btn = e.target.closest("button[data-tab]");
     if(!btn) return;
     activeMainTab = btn.getAttribute("data-tab");
-    document.querySelectorAll(".sidebar-link").forEach(b=>b.classList.toggle("active", b===btn));
     closeSidebar();
-    if(activeMainTab === "submit") renderSubmitView();
-    else renderDashboard();
+    renderAppShell();
   });
 
+  function updateSidebarForRole(){
+    const nav = document.getElementById("sidebarNav");
+    const isAdmin = !!(authProfile && authProfile.isAdmin);
+    nav.innerHTML = `
+      <button class="sidebar-link ${activeMainTab==='submit'?'active':''}" data-tab="submit">
+        ${ICONS.plus} تسجيل تقييم
+      </button>
+      ${isAdmin ? `
+      <button class="sidebar-link ${activeMainTab==='dashboard'?'active':''}" data-tab="dashboard">
+        ${ICONS.settings} الإعدادات
+      </button>` : ``}
+      <button class="sidebar-link" id="logout-btn" type="button">
+        ${ICONS.close} تسجيل الخروج
+      </button>
+    `;
+    document.getElementById("logout-btn").addEventListener("click", async ()=>{
+      closeSidebar();
+      try{ await signOutUser(); }catch(e){}
+    });
+  }
+
+  /* ---------------- Auth screens ---------------- */
+  function authErrorMessage(e){
+    const code = e && e.code;
+    if(code === "auth/email-already-in-use") return "اسم المستخدم ده مستخدم بالفعل";
+    if(code === "auth/wrong-password" || code === "auth/user-not-found" || code === "auth/invalid-credential") return "اسم المستخدم أو كلمة السر غلط";
+    if(code === "auth/weak-password") return "كلمة السر ضعيفة، اكتب 6 حروف على الأقل";
+    if(code === "auth/invalid-email") return "اسم المستخدم غير صالح، استخدم حروف وأرقام بس";
+    return "حدث خطأ، حاول مرة أخرى";
+  }
+
+  function renderAuthScreen(){
+    const isLogin = authScreenMode === "login";
+    view.innerHTML = `
+      <div class="pin-gate" style="max-width:380px;">
+        <div class="mark">${ICONS.lock}</div>
+        <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">${isLogin ? "تسجيل الدخول" : "إنشاء حساب جديد"}</h2>
+        <p style="color:var(--muted);font-size:13.5px;margin:0;">${isLogin ? "ادخل باسم المستخدم وكلمة السر بتاعتك" : "هيتم إرسال طلبك للمدير للموافقة عليه"}</p>
+        <div class="field" style="text-align:right;margin-top:16px;">
+          <label>اسم المستخدم</label>
+          <input type="text" id="auth-username" placeholder="مثال: mohamed">
+        </div>
+        <div class="field" style="text-align:right;margin-top:12px;">
+          <label>كلمة السر</label>
+          <input type="password" id="auth-password" placeholder="••••••">
+        </div>
+        <div class="pin-error" id="auth-error"></div>
+        <button class="btn btn-primary" id="auth-submit" style="width:100%;justify-content:center;margin-top:6px;">
+          ${isLogin ? "دخول" : "إرسال الطلب"}
+        </button>
+        <button class="btn btn-ghost" id="auth-switch" style="width:100%;justify-content:center;margin-top:8px;">
+          ${isLogin ? "مفيش عندك حساب؟ سجّل جديد" : "عندك حساب بالفعل؟ سجّل دخول"}
+        </button>
+      </div>
+    `;
+    document.getElementById("auth-switch").addEventListener("click", ()=>{
+      authScreenMode = isLogin ? "signup" : "login";
+      renderAuthScreen();
+    });
+    document.getElementById("auth-submit").addEventListener("click", async ()=>{
+      const username = document.getElementById("auth-username").value.trim();
+      const password = document.getElementById("auth-password").value;
+      const errEl = document.getElementById("auth-error");
+      errEl.textContent = "";
+      if(!username || !password){ errEl.textContent = "اكتب اسم المستخدم وكلمة السر"; return; }
+      if(password.length < 6){ errEl.textContent = "كلمة السر لازم تكون 6 حروف على الأقل"; return; }
+      const btn = document.getElementById("auth-submit");
+      btn.disabled = true;
+      try{
+        if(isLogin){
+          await signInUser(username, password);
+        } else {
+          const becameAdmin = await signUpUser(username, password);
+          if(!becameAdmin) toast("تم إرسال طلبك، استنى موافقة المدير");
+        }
+      }catch(e){
+        btn.disabled = false;
+        errEl.textContent = authErrorMessage(e);
+      }
+    });
+  }
+
+  function renderPendingScreen(){
+    view.innerHTML = `
+      <div class="pin-gate">
+        <div class="mark">${ICONS.clock}</div>
+        <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">في انتظار موافقة المدير</h2>
+        <p style="color:var(--muted);font-size:13.5px;margin:0;">تم استلام طلبك، هتقدر تدخل بعد ما المدير يوافق عليك.</p>
+        <button class="btn btn-ghost" id="pending-logout" style="width:100%;justify-content:center;margin-top:16px;">تسجيل الخروج</button>
+      </div>
+    `;
+    document.getElementById("pending-logout").addEventListener("click", async ()=>{ try{ await signOutUser(); }catch(e){} });
+  }
+
+  function renderRejectedScreen(){
+    view.innerHTML = `
+      <div class="pin-gate">
+        <div class="mark">${ICONS.xCircle}</div>
+        <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">تم رفض الطلب</h2>
+        <p style="color:var(--muted);font-size:13.5px;margin:0;">تواصل مع المدير لمعرفة السبب.</p>
+        <button class="btn btn-ghost" id="rejected-logout" style="width:100%;justify-content:center;margin-top:16px;">تسجيل الخروج</button>
+      </div>
+    `;
+    document.getElementById("rejected-logout").addEventListener("click", async ()=>{ try{ await signOutUser(); }catch(e){} });
+  }
+
+  /* ---------------- App shell router ---------------- */
+  function renderAppShell(){
+    if(usingFallback){
+      menuToggleBtn.style.display = "none";
+      view.innerHTML = `
+        <div class="pin-gate">
+          <div class="mark">${ICONS.info}</div>
+          <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">تسجيل الدخول غير متاح الآن</h2>
+          <p style="color:var(--muted);font-size:13.5px;margin:0;">تأكد من الاتصال بالإنترنت وحدّث الصفحة.</p>
+        </div>
+      `;
+      return;
+    }
+    if(!authReady){
+      menuToggleBtn.style.display = "none";
+      view.innerHTML = `<div class="empty-state"><p>جارٍ التحقق من الحساب...</p></div>`;
+      return;
+    }
+    if(!authUser){
+      menuToggleBtn.style.display = "none";
+      renderAuthScreen();
+      return;
+    }
+    if(!authProfile){
+      menuToggleBtn.style.display = "none";
+      view.innerHTML = `<div class="empty-state"><p>جارٍ تحميل بيانات الحساب...</p></div>`;
+      return;
+    }
+    if(authProfile.status === "pending"){
+      menuToggleBtn.style.display = "none";
+      renderPendingScreen();
+      return;
+    }
+    if(authProfile.status === "rejected"){
+      menuToggleBtn.style.display = "none";
+      renderRejectedScreen();
+      return;
+    }
+    menuToggleBtn.style.display = "";
+    updateSidebarForRole();
+    if(activeMainTab === "submit") renderSubmitView();
+    else renderDashboard();
+  }
+
   /* ---------------- Init ---------------- */
-  (async function init(){
-    view.innerHTML = `<div class="empty-state"><p>جارٍ التحميل...</p></div>`;
-    try{ config = await loadConfig(); }
-    catch(e){ config = defaultConfig(); }
-    renderSubmitView();
-  })();
+  if(usingFallback){
+    renderAppShell();
+  } else {
+    auth.onAuthStateChanged(async (user)=>{
+      authUser = user;
+      authProfile = user ? await fetchUserProfile(user.uid) : null;
+      authReady = true;
+      if(authUser && authProfile && authProfile.status === "approved" && !config){
+        try{ config = await loadConfig(); }catch(e){ config = defaultConfig(); }
+      }
+      renderAppShell();
+    });
+  }
 })();
 </script>
 </body>
