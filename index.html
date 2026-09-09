@@ -876,7 +876,9 @@
           <div class="field-row">
             <div class="field">
               <label>التاريخ</label>
-              <input type="date" id="f-date" value="${formState.date}">
+              <div style="font-weight:800;font-size:14.5px;padding:10px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border);">
+                ${new Date().toLocaleDateString("ar-EG", { weekday:"long", year:"numeric", month:"long", day:"numeric" })}
+              </div>
             </div>
             <div class="field">
               <label>اسم المسؤول عن الشيفت</label>
@@ -939,7 +941,6 @@
       });
     }
 
-    document.getElementById("f-date").addEventListener("input", e=>formState.date = e.target.value);
     document.getElementById("f-responsible").addEventListener("input", e=>formState.responsible = e.target.value);
 
     bindEmployeeRatings(document.getElementById("emp-ratings-list"), formState.employeeRatings);
@@ -1180,7 +1181,7 @@
       const record = {
         shiftKey: formState.shiftKey,
         shiftLabel: shift.label,
-        date: formState.date,
+        date: todayISO(),
         responsible: formState.responsible.trim(),
         sections: shift.sections.map(sec => ({
           id: sec.id,
