@@ -324,6 +324,12 @@
   .emp-rank-list{display:flex;flex-direction:column;gap:2px;}
   .emp-rank-row{display:flex;justify-content:space-between;font-size:13px;padding:5px 0;color:var(--muted);}
   .emp-rank-row.top{color:var(--ink);font-weight:800;}
+
+  .day-shift-pills{display:flex;flex-wrap:wrap;gap:8px;}
+  .day-shift-pill{display:flex;align-items:center;gap:5px;padding:6px 13px;border-radius:999px;font-size:12.5px;font-weight:700;}
+  .day-shift-pill .ic{width:14px;height:14px;}
+  .day-shift-pill.done{background:var(--ok-soft);color:var(--ok-ink);}
+  .day-shift-pill.missing{background:var(--danger-soft);color:var(--danger);}
   .eval-quick-delete{flex:none;}
 
   .empty-state{text-align:center;padding:50px 20px;color:var(--muted);}
@@ -719,6 +725,18 @@
     return items;
   }
 
+  async function findTodayEvaluation(shiftKey){
+    const today = todayISO();
+    if(!usingFallback){
+      try{
+        const snap = await withTimeout(EVALS_COL().where("shiftKey","==",shiftKey).where("date","==",today).get(), 6000);
+        return snap.empty ? null : { id: snap.docs[0].id, data: snap.docs[0].data() };
+      }catch(e){ usingFallback = true; }
+    }
+    const items = localAdapter.listEvaluations().filter(x=>x.data.shiftKey===shiftKey && x.data.date===today);
+    return items.length ? items[0] : null;
+  }
+
   async function deleteEvaluation(id){
     if(!usingFallback){
       try{ await withTimeout(EVALS_COL().doc(id).delete(), 6000); return; }
@@ -828,7 +846,7 @@
     ];
   }
 
-  function renderSubmitView(){
+  async function renderSubmitView(){
     const shiftKeys = Object.keys(config.shifts);
     const isAdmin = !!(authProfile && authProfile.isAdmin);
     let lockedShiftKey = null;
@@ -851,6 +869,7 @@
       formState = freshFormState(lockedShiftKey || shiftKeys[0]);
     }
     const shift = config.shifts[formState.shiftKey];
+    const requestToken = (renderSubmitView._token = (renderSubmitView._token||0) + 1);
 
     view.innerHTML = `
       ${storageNoteHtml()}
@@ -869,7 +888,33 @@
           </div>
         </div>
       </div>
+      <div id="submit-body"><div class="empty-state"><p>جارٍ التحقق...</p></div></div>
+    `;
 
+    if(isAdmin){
+      document.getElementById("shift-select").addEventListener("change", e=>{
+        const s = e.target.value;
+        if(s !== formState.shiftKey){ formState = freshFormState(s); renderSubmitView(); }
+      });
+    }
+
+    const bodyEl = document.getElementById("submit-body");
+    let existing = null;
+    try{ existing = await findTodayEvaluation(formState.shiftKey); }catch(e){ existing = null; }
+    if(requestToken !== renderSubmitView._token) return; // a newer render happened meanwhile, discard this one
+
+    if(existing){
+      bodyEl.innerHTML = `
+        <div class="pin-gate" style="max-width:420px;">
+          <div class="mark">${ICONS.checkCircle}</div>
+          <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">تم تسجيل تقرير اليوم بالفعل</h2>
+          <p style="color:var(--muted);font-size:13.5px;margin:0;">تم إدخال تقرير لـ"${escapeHtml(shift.label)}" النهاردة. مسموح بتقرير واحد بس لكل شيفت في اليوم — تقدر تدخل تقرير جديد بداية من بكرة.</p>
+        </div>
+      `;
+      return;
+    }
+
+    bodyEl.innerHTML = `
       <div class="label-card">
         <div class="tag-edge"></div>
         <div class="body">
@@ -934,13 +979,6 @@
       </div>
     `;
 
-    if(isAdmin){
-      document.getElementById("shift-select").addEventListener("change", e=>{
-        const s = e.target.value;
-        if(s !== formState.shiftKey){ formState = freshFormState(s); renderSubmitView(); }
-      });
-    }
-
     document.getElementById("f-responsible").addEventListener("input", e=>formState.responsible = e.target.value);
 
     bindEmployeeRatings(document.getElementById("emp-ratings-list"), formState.employeeRatings);
@@ -949,7 +987,7 @@
       bindTaskRows(document.getElementById("section-list-"+sec.id), formState.sections[sec.id]);
     });
 
-    view.querySelectorAll("[data-note]").forEach(el=>{
+    bodyEl.querySelectorAll("[data-note]").forEach(el=>{
       el.addEventListener("input", e=>{ formState.notes[Number(el.getAttribute("data-note"))] = e.target.value; });
     });
 
@@ -1143,6 +1181,15 @@
     const shift = config.shifts[formState.shiftKey];
     const missing = shift.sections.some(sec => formState.sections[sec.id].some(s => !s.status));
     if(missing){ toast("من فضلك حدّد حالة كل المهام قبل الإرسال", true); return; }
+
+    try{
+      const already = await findTodayEvaluation(formState.shiftKey);
+      if(already){
+        toast("تم تسجيل تقرير لهذا الشيفت اليوم بالفعل", true);
+        renderSubmitView();
+        return;
+      }
+    }catch(e){ /* if the check itself fails, fall through and let the submit attempt proceed */ }
 
     const missingPhotoRows = [];
     shift.sections.forEach(sec=>{
@@ -1567,7 +1614,88 @@
     container.innerHTML = `<div class="empty-state"><p>جارٍ تحميل التقييمات...</p></div>`;
     try{ evalCache = await listEvaluations(); }
     catch(e){ container.innerHTML = `<div class="empty-state"><p>تعذّر تحميل التقييمات. حاول تحديث الصفحة.</p></div>`; return; }
-    drawEvaluationsList(container);
+    drawEvaluationsScreen(container);
+  }
+
+  function drawEvaluationsScreen(container){
+    const mode = drawEvaluationsScreen._mode || "list";
+    container.innerHTML = `
+      <div class="subtabs" style="margin-bottom:16px;">
+        <button data-mode="list" class="${mode==='list'?'active':''}">${ICONS.clipboard} قائمة التقييمات</button>
+        <button data-mode="daily" class="${mode==='daily'?'active':''}">${ICONS.clock} السجل اليومي</button>
+      </div>
+      <div id="eval-screen-body"></div>
+    `;
+    container.querySelectorAll("[data-mode]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        drawEvaluationsScreen._mode = btn.getAttribute("data-mode");
+        drawEvaluationsScreen(container);
+      });
+    });
+    const body = document.getElementById("eval-screen-body");
+    if(mode === "list") drawEvaluationsList(body);
+    else drawDailyLog(body);
+  }
+
+  function drawDailyLog(container){
+    const month = drawDailyLog._month || todayISO().slice(0,7);
+    drawDailyLog._month = month;
+
+    container.innerHTML = `
+      <div class="eval-filters">
+        ${ICONS.filter}
+        <input type="month" id="daily-log-month" value="${month}">
+      </div>
+      <div id="daily-log-list"></div>
+    `;
+    document.getElementById("daily-log-month").addEventListener("change", e=>{
+      drawDailyLog._month = e.target.value;
+      drawDailyLog(container);
+    });
+
+    const [y,m] = month.split("-").map(Number);
+    const daysInMonth = new Date(y, m, 0).getDate();
+    const todayStr = todayISO();
+    const shiftKeys = Object.keys(config.shifts);
+
+    const byDate = {};
+    evalCache.forEach(({data})=>{
+      if((data.date||"").slice(0,7) !== month) return;
+      if(!byDate[data.date]) byDate[data.date] = {};
+      byDate[data.date][data.shiftKey] = true;
+    });
+
+    const listEl = document.getElementById("daily-log-list");
+    const rows = [];
+    for(let d=daysInMonth; d>=1; d--){
+      const dateStr = `${month}-${String(d).padStart(2,"0")}`;
+      if(dateStr > todayStr) continue;
+      rows.push({ dateStr, dayShifts: byDate[dateStr] || {} });
+    }
+
+    if(rows.length === 0){
+      listEl.innerHTML = `<div class="empty-state"><p>لا توجد أيام لعرضها.</p></div>`;
+      return;
+    }
+    if(shiftKeys.length === 0){
+      listEl.innerHTML = `<div class="empty-state"><p>لا توجد شيفتات مضافة بعد.</p></div>`;
+      return;
+    }
+
+    listEl.innerHTML = rows.map(({dateStr, dayShifts})=>{
+      const dateLabel = new Date(dateStr+"T00:00:00").toLocaleDateString("ar-EG", { weekday:"long", day:"numeric", month:"long" });
+      return `
+        <div class="label-card"><div class="tag-edge"></div><div class="body">
+          <h3 class="section-title" style="margin-bottom:12px;">${dateLabel}</h3>
+          <div class="day-shift-pills">
+            ${shiftKeys.map(k=>{
+              const done = !!dayShifts[k];
+              return `<span class="day-shift-pill ${done?'done':'missing'}">${done?ICONS.checkCircle:ICONS.xCircle} ${escapeHtml(config.shifts[k].label)}</span>`;
+            }).join("")}
+          </div>
+        </div></div>
+      `;
+    }).join("");
   }
 
   async function renderMonthlyRatings(container){
