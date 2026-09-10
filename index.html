@@ -596,6 +596,7 @@
         });
       }
       s.employees = Array.isArray(s.employees) ? s.employees.filter(e=>typeof e === "string") : [];
+      s.responsibleName = typeof s.responsibleName === "string" ? s.responsibleName : "";
     });
     return cfg;
   }
@@ -817,7 +818,6 @@
     return {
       shiftKey,
       date: todayISO(),
-      responsible: "",
       sections,
       employeeRatings,
       notes: config.notesFields.map(()=>"")
@@ -899,6 +899,18 @@
     }
 
     const bodyEl = document.getElementById("submit-body");
+
+    if(!shift.responsibleName || !shift.responsibleName.trim()){
+      bodyEl.innerHTML = `
+        <div class="pin-gate">
+          <div class="mark">${ICONS.info}</div>
+          <h2 style="font-family:'Cairo',sans-serif;margin:0 0 6px;">لسه معندكش اسم مسؤول محدد</h2>
+          <p style="color:var(--muted);font-size:13.5px;margin:0;">تواصل مع المدير عشان يحدد اسم المسؤول عن هذا الشيفت من الإعدادات.</p>
+        </div>
+      `;
+      return;
+    }
+
     let existing = null;
     try{ existing = await findTodayEvaluation(formState.shiftKey); }catch(e){ existing = null; }
     if(requestToken !== renderSubmitView._token) return; // a newer render happened meanwhile, discard this one
@@ -927,7 +939,7 @@
             </div>
             <div class="field">
               <label>اسم المسؤول عن الشيفت</label>
-              <input type="text" id="f-responsible" placeholder="الاسم" value="${escapeHtml(formState.responsible)}">
+              <div style="font-weight:800;font-size:14.5px;padding:10px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border);">${escapeHtml(shift.responsibleName)}</div>
             </div>
           </div>
         </div>
@@ -978,8 +990,6 @@
         <button class="btn btn-primary" id="submit-btn">${ICONS.send} إرسال التقييم</button>
       </div>
     `;
-
-    document.getElementById("f-responsible").addEventListener("input", e=>formState.responsible = e.target.value);
 
     bindEmployeeRatings(document.getElementById("emp-ratings-list"), formState.employeeRatings);
 
@@ -1177,7 +1187,6 @@
   }
 
   async function handleSubmit(){
-    if(!formState.responsible.trim()){ toast("من فضلك اكتب اسم المسؤول عن الشيفت", true); return; }
     const shift = config.shifts[formState.shiftKey];
     const missing = shift.sections.some(sec => formState.sections[sec.id].some(s => !s.status));
     if(missing){ toast("من فضلك حدّد حالة كل المهام قبل الإرسال", true); return; }
@@ -1229,7 +1238,7 @@
         shiftKey: formState.shiftKey,
         shiftLabel: shift.label,
         date: todayISO(),
-        responsible: formState.responsible.trim(),
+        responsible: shift.responsibleName.trim(),
         sections: shift.sections.map(sec => ({
           id: sec.id,
           title: sec.title,
@@ -1447,9 +1456,14 @@
       const name = prompt("اسم الشيفت الجديد:");
       if(!name || !name.trim()) return;
       const key = "shift_" + Date.now();
-      config.shifts[key] = { label:name.trim(), sections:[
-        {id:"section_"+Date.now(), title:"مهام", type:"status", tasks:[]}
-      ]};
+      config.shifts[key] = {
+        label: name.trim(),
+        responsibleName: "",
+        employees: [],
+        sections: [
+          {id:"section_"+Date.now(), title:"مهام", type:"status", tasks:[]}
+        ]
+      };
       renderTasksEditor._shift = key;
       renderTasksEditor(container);
     });
@@ -1503,14 +1517,28 @@
   }
 
   function employeesEditorCardHtml(shift){
+    const employees = shift.employees || (shift.employees = []);
     return `
       <div class="label-card"><div class="tag-edge"></div><div class="body">
         <h3 class="section-title"><span class="icon-badge">${ICONS.star}</span> الموظفون في هذا الشيفت</h3>
         <p class="section-hint">هيظهروا للمسؤول عند تسجيل التقييم عشان يقيّمهم بالنجوم.</p>
         <div id="employees-list">
-          ${shift.employees.map((name,i)=>employeeEditRowHtml(name,i)).join("")}
+          ${employees.map((name,i)=>employeeEditRowHtml(name,i)).join("")}
         </div>
         <button class="add-task-btn" id="add-employee-btn">${ICONS.plus} إضافة موظف</button>
+      </div></div>
+    `;
+  }
+
+  function responsibleNameCardHtml(shift){
+    return `
+      <div class="label-card"><div class="tag-edge"></div><div class="body">
+        <h3 class="section-title"><span class="icon-badge">${ICONS.checkCircle}</span> اسم المسؤول عن الشيفت</h3>
+        <p class="section-hint">الاسم ده هيظهر ثابت في نموذج التقييم، ومش هيقدر أي حد يغيّره غيرك.</p>
+        <div class="field">
+          <label>الاسم</label>
+          <input type="text" id="responsible-name-input" placeholder="مثال: ملك ماجد" value="${escapeHtml(shift.responsibleName||"")}">
+        </div>
       </div></div>
     `;
   }
@@ -1518,13 +1546,18 @@
   function renderSectionsEditor(container, shiftKey){
     const shift = config.shifts[shiftKey];
 
-    container.innerHTML = shift.sections.map((sec,si)=>sectionEditorCardHtml(sec,si)).join("") + `
+    container.innerHTML = responsibleNameCardHtml(shift) +
+      shift.sections.map((sec,si)=>sectionEditorCardHtml(sec,si)).join("") + `
       <button class="add-task-btn" id="add-section-btn">${ICONS.plus} إضافة قسم جديد</button>
       ${employeesEditorCardHtml(shift)}
       <div class="submit-bar">
         <button class="btn btn-primary" id="save-tasks">${ICONS.check} حفظ التعديلات</button>
       </div>
     `;
+
+    document.getElementById("responsible-name-input").addEventListener("input", e=>{
+      shift.responsibleName = e.target.value;
+    });
 
     function refreshEmployeeHandlers(){
       const g = document.getElementById("employees-list");
