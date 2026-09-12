@@ -661,6 +661,7 @@
 
   const CONFIG_DOC = () => db.collection("config").doc("main");
   const EVALS_COL = () => db.collection("evaluations");
+  const DELETED_DAYS_COL = () => db.collection("deletedDays");
 
   function withTimeout(promise, ms){
     return new Promise((resolve, reject)=>{
@@ -787,6 +788,23 @@
 
   const BACKFILL_MAX_DAYS = 14; // don't backfill further back than this, to avoid runaway writes
 
+  async function markDayDeleted(shiftKey, dateStr){
+    if(usingFallback) return;
+    try{
+      await DELETED_DAYS_COL().doc(shiftKey+"__"+dateStr).set({ shiftKey, date: dateStr, deletedAt: Date.now() });
+    }catch(e){ /* best-effort only */ }
+  }
+
+  async function getDeletedDaysSet(shiftKey){
+    const set = new Set();
+    if(usingFallback) return set;
+    try{
+      const snap = await DELETED_DAYS_COL().where("shiftKey","==",shiftKey).get();
+      snap.forEach(doc=>{ const d = doc.data().date; if(d) set.add(d); });
+    }catch(e){ /* if this fails, we just risk re-creating a previously-deleted day */ }
+    return set;
+  }
+
   async function createMissingRecord(shiftKey, dateStr, attributedUid, attributedUsername){
     const shift = config.shifts[shiftKey];
     if(!shift) return;
@@ -810,7 +828,7 @@
     }catch(e){ /* skip this day silently, next session will retry */ }
   }
 
-  async function backfillGapsForShift(shiftKey, existingDates, attributedUid, attributedUsername){
+  async function backfillGapsForShift(shiftKey, existingDates, attributedUid, attributedUsername, deletedDates){
     const todayStr = todayISO();
     const yesterdayStr = addDaysToDateStr(todayStr, -1);
     let startStr = addDaysToDateStr(todayStr, -BACKFILL_MAX_DAYS);
@@ -822,7 +840,7 @@
     if(startStr > yesterdayStr) return;
     let cur = startStr;
     while(cur <= yesterdayStr){
-      if(!existingDates.has(cur)){
+      if(!existingDates.has(cur) && !(deletedDates && deletedDates.has(cur))){
         await createMissingRecord(shiftKey, cur, attributedUid, attributedUsername);
       }
       cur = addDaysToDateStr(cur, 1);
@@ -837,7 +855,8 @@
       const snap = await EVALS_COL().where("submittedByUid","==",authUser.uid).where("shiftKey","==",shiftKey).get();
       const dates = new Set();
       snap.forEach(doc=>{ const d = doc.data().date; if(d) dates.add(d); });
-      await backfillGapsForShift(shiftKey, dates, authUser.uid, authProfile.username||null);
+      const deletedDates = await getDeletedDaysSet(shiftKey);
+      await backfillGapsForShift(shiftKey, dates, authUser.uid, authProfile.username||null, deletedDates);
     }catch(e){ /* best-effort only */ }
   }
 
@@ -857,8 +876,9 @@
           const snap = await EVALS_COL().where("shiftKey","==",shiftKey).get();
           const dates = new Set();
           snap.forEach(doc=>{ const d = doc.data().date; if(d) dates.add(d); });
+          const deletedDates = await getDeletedDaysSet(shiftKey);
           const attrib = shiftUidMap[shiftKey] || {};
-          await backfillGapsForShift(shiftKey, dates, attrib.uid||null, attrib.username||null);
+          await backfillGapsForShift(shiftKey, dates, attrib.uid||null, attrib.username||null, deletedDates);
         }catch(e){ /* continue with next shift */ }
       }
     }catch(e){ /* best-effort only */ }
@@ -2013,9 +2033,11 @@
       btn.addEventListener("click", async (e)=>{
         e.stopPropagation();
         const id = btn.getAttribute("data-quickdelete");
+        const target = evalCache.find(x=>x.id===id);
         if(!confirm("هل تريد حذف هذا التقييم نهائيًا؟")) return;
         try{
           await deleteEvaluation(id);
+          if(target && target.data.isMissing) await markDayDeleted(target.data.shiftKey, target.data.date);
           evalCache = evalCache.filter(x=>x.id!==id);
           drawEvaluationsList(container);
           toast("تم حذف التقييم");
@@ -2145,6 +2167,7 @@
       if(!confirm("هل تريد حذف هذا التقييم نهائيًا؟")) return;
       try{
         await deleteEvaluation(item.id);
+        if(d.isMissing) await markDayDeleted(d.shiftKey, d.date);
         evalCache = evalCache.filter(x=>x.id!==item.id);
         backdrop.remove();
         drawEvaluationsList(listContainer);
