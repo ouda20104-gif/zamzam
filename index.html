@@ -285,6 +285,15 @@
 
   .eval-item{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;margin-bottom:10px;cursor:pointer;display:flex;align-items:center;gap:14px;}
   .eval-item.is-missing{border-color:var(--danger);background:var(--danger-soft);}
+
+  .day-eval-rows{display:flex;flex-direction:column;gap:8px;}
+  .day-eval-row{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:10px;border:1px solid transparent;cursor:pointer;flex-wrap:wrap;}
+  .day-eval-row.missing-row{background:var(--danger-soft);border-color:var(--danger);cursor:default;}
+  .day-eval-color-dot{width:10px;height:10px;border-radius:50%;flex:none;}
+  .day-eval-main{flex:1;display:flex;flex-direction:column;gap:2px;min-width:120px;}
+  .day-eval-shift-name{font-weight:800;font-size:14px;}
+  .day-eval-row.missing-row .day-eval-shift-name{flex:1;}
+  .day-eval-delete{flex:none;}
   .label-card.is-missing{border-color:var(--danger);}
   .label-card.is-missing .tag-edge{background:var(--danger);opacity:1;}
   .eval-item .eval-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--accent-soft);color:var(--accent-ink);}
@@ -676,12 +685,12 @@
   async function loadConfig(){
     if(!usingFallback){
       try{
-        const snap = await withTimeout(CONFIG_DOC().get(), 6000);
+        const snap = await withTimeout(CONFIG_DOC().get(), 12000);
         if(snap.exists) return normalizeConfig(snap.data());
         const cfg = defaultConfig();
-        await withTimeout(CONFIG_DOC().set(cfg), 6000);
+        await withTimeout(CONFIG_DOC().set(cfg), 12000);
         return cfg;
-      }catch(e){ usingFallback = true; }
+      }catch(e){ /* transient failure — retry Firestore fresh next call, don't disable it for the session */ }
     }
     let cfg = localAdapter.getConfig();
     if(!cfg){ cfg = defaultConfig(); localAdapter.setConfig(cfg); }
@@ -690,16 +699,16 @@
 
   async function saveConfig(cfg){
     if(!usingFallback){
-      try{ await withTimeout(CONFIG_DOC().set(cfg), 6000); return; }
-      catch(e){ usingFallback = true; }
+      try{ await withTimeout(CONFIG_DOC().set(cfg), 12000); return; }
+      catch(e){ /* transient failure — fall through to local save for this call only */ }
     }
     localAdapter.setConfig(cfg);
   }
 
   async function submitEvaluation(record){
     if(!usingFallback){
-      try{ const ref = await withTimeout(EVALS_COL().add(record), 6000); return ref.id; }
-      catch(e){ usingFallback = true; }
+      try{ const ref = await withTimeout(EVALS_COL().add(record), 12000); return ref.id; }
+      catch(e){ /* transient failure — fall through to local save for this call only */ }
     }
     return localAdapter.addEvaluation(record);
   }
@@ -707,9 +716,9 @@
   async function listEvaluations(){
     if(!usingFallback){
       try{
-        const snap = await withTimeout(EVALS_COL().orderBy("submittedAt","desc").get(), 6000);
+        const snap = await withTimeout(EVALS_COL().orderBy("submittedAt","desc").get(), 12000);
         return snap.docs.map(d=>({ id:d.id, data:d.data() }));
-      }catch(e){ usingFallback = true; }
+      }catch(e){ /* transient failure — retry Firestore fresh next call */ }
     }
     const items = localAdapter.listEvaluations();
     items.sort((a,b)=> (b.data.submittedAt||0) - (a.data.submittedAt||0));
@@ -719,11 +728,11 @@
   async function listMyEvaluations(uid){
     if(!usingFallback){
       try{
-        const snap = await withTimeout(EVALS_COL().where("submittedByUid","==",uid).get(), 6000);
+        const snap = await withTimeout(EVALS_COL().where("submittedByUid","==",uid).get(), 12000);
         const items = snap.docs.map(d=>({ id:d.id, data:d.data() }));
         items.sort((a,b)=> (b.data.submittedAt||0) - (a.data.submittedAt||0));
         return items;
-      }catch(e){ usingFallback = true; }
+      }catch(e){ /* transient failure — retry Firestore fresh next call */ }
     }
     const items = localAdapter.listEvaluations().filter(x=>x.data.submittedByUid===uid);
     items.sort((a,b)=> (b.data.submittedAt||0) - (a.data.submittedAt||0));
@@ -742,7 +751,7 @@
           // that rejection must NOT be treated as "Firestore is unreachable".
           query = query.where("submittedByUid","==",authUser.uid);
         }
-        const snap = await withTimeout(query.get(), 6000);
+        const snap = await withTimeout(query.get(), 12000);
         return snap.empty ? null : { id: snap.docs[0].id, data: snap.docs[0].data() };
       }catch(e){
         // Swallow the error without flipping the global usingFallback flag — a failure
@@ -760,8 +769,8 @@
 
   async function deleteEvaluation(id){
     if(!usingFallback){
-      try{ await withTimeout(EVALS_COL().doc(id).delete(), 6000); return; }
-      catch(e){ usingFallback = true; }
+      try{ await withTimeout(EVALS_COL().doc(id).delete(), 12000); return; }
+      catch(e){ /* transient failure — fall through to local delete for this call only */ }
     }
     localAdapter.deleteEvaluation(id);
   }
@@ -769,8 +778,8 @@
   async function updateEvaluationScore(id, score, note){
     const fields = { adminScore: score, adminScoreNote: note };
     if(!usingFallback){
-      try{ await withTimeout(EVALS_COL().doc(id).update(fields), 6000); return; }
-      catch(e){ usingFallback = true; }
+      try{ await withTimeout(EVALS_COL().doc(id).update(fields), 12000); return; }
+      catch(e){ /* transient failure — fall through to local update for this call only */ }
     }
     localAdapter.updateEvaluation(id, fields);
   }
@@ -1960,9 +1969,26 @@
     }).join("");
   }
 
+  const SHIFT_COLOR_PALETTE = [
+    {soft:'#FBE1DF', ink:'#8C1414'},
+    {soft:'#DCF2E9', ink:'#0F6B4C'},
+    {soft:'#E4E6F7', ink:'#3D4499'},
+    {soft:'#FCEFC7', ink:'#8A6415'},
+    {soft:'#EFE7FB', ink:'#5B34A8'},
+    {soft:'#D9F2F5', ink:'#146B77'},
+    {soft:'#FBE1EE', ink:'#9A2A63'},
+    {soft:'#EAF1D9', ink:'#5C6B2C'}
+  ];
+  function shiftColor(shiftKey){
+    const keys = Object.keys(config.shifts);
+    const idx = keys.indexOf(shiftKey);
+    return SHIFT_COLOR_PALETTE[idx >= 0 ? idx % SHIFT_COLOR_PALETTE.length : 0];
+  }
+
   function drawEvaluationsList(container){
     const shiftFilter = drawEvaluationsList._shift || "all";
-    const dateFilter = drawEvaluationsList._date || "";
+    const month = drawEvaluationsList._month || todayISO().slice(0,7);
+    drawEvaluationsList._month = month;
 
     const shiftLabelMap = {};
     Object.keys(config.shifts).forEach(k=>{ shiftLabelMap[k] = config.shifts[k].label; });
@@ -1975,61 +2001,99 @@
           <option value="all" ${shiftFilter==='all'?'selected':''}>كل الشيفتات</option>
           ${Object.keys(shiftLabelMap).map(k=>`<option value="${k}" ${shiftFilter===k?'selected':''}>${escapeHtml(shiftLabelMap[k])}</option>`).join("")}
         </select>
-        <input type="date" id="filter-date" value="${dateFilter}">
+        <input type="month" id="filter-month" value="${month}">
         <button class="btn btn-ghost btn-small" id="clear-filters">إلغاء الفلاتر</button>
       </div>
-      <div id="eval-list"></div>
+      <div id="eval-day-groups"></div>
     `;
 
     document.getElementById("filter-shift").addEventListener("change", e=>{ drawEvaluationsList._shift = e.target.value; drawEvaluationsList(container); });
-    document.getElementById("filter-date").addEventListener("change", e=>{ drawEvaluationsList._date = e.target.value; drawEvaluationsList(container); });
-    document.getElementById("clear-filters").addEventListener("click", ()=>{ drawEvaluationsList._shift="all"; drawEvaluationsList._date=""; drawEvaluationsList(container); });
+    document.getElementById("filter-month").addEventListener("change", e=>{ drawEvaluationsList._month = e.target.value; drawEvaluationsList(container); });
+    document.getElementById("clear-filters").addEventListener("click", ()=>{
+      drawEvaluationsList._shift = "all";
+      drawEvaluationsList._month = todayISO().slice(0,7);
+      drawEvaluationsList(container);
+    });
 
-    let items = evalCache;
-    if(shiftFilter !== "all") items = items.filter(x=>x.data.shiftKey===shiftFilter);
-    if(dateFilter) items = items.filter(x=>x.data.date===dateFilter);
+    const groupsEl = document.getElementById("eval-day-groups");
 
-    const list = document.getElementById("eval-list");
-    if(items.length === 0){
-      list.innerHTML = `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لا توجد تقييمات مطابقة بعد.</p></div>`;
+    const byDate = {};
+    evalCache.forEach(item=>{
+      const d = item.data.date;
+      if(!d || d.slice(0,7) !== month) return;
+      if(shiftFilter !== "all" && item.data.shiftKey !== shiftFilter) return;
+      if(!byDate[d]) byDate[d] = [];
+      byDate[d].push(item);
+    });
+
+    const dateKeys = Object.keys(byDate).sort().reverse();
+
+    if(dateKeys.length === 0){
+      groupsEl.innerHTML = `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لا توجد تقييمات في هذا الشهر.</p></div>`;
       return;
     }
 
-    list.innerHTML = items.map(({id, data})=>{
-      const allTasks = evalSections(data).flatMap(sec=>sec.tasks);
-      const okCount = allTasks.filter(t=>t.status==="done").length;
-      const badCount = allTasks.length - okCount;
-      const timeStr = formatTime(data.submittedAt);
-      return `
-        <div class="eval-item ${data.isMissing?'is-missing':''}" data-id="${id}" data-shift="${data.shiftKey}">
-          <span class="eval-icon">${shiftIcon(data.shiftKey)}</span>
-          <div class="eval-item-body">
-            <div>
-              <span class="eval-badge ${data.shiftKey}">${escapeHtml(data.shiftLabel)}</span>
-              <div class="eval-meta">${escapeHtml(data.date)}${timeStr?' — '+timeStr:''} — ${escapeHtml(data.responsible)}</div>
+    const shiftKeysForDisplay = shiftFilter === "all" ? Object.keys(config.shifts) : [shiftFilter];
+
+    groupsEl.innerHTML = dateKeys.map(dateStr=>{
+      const dayItems = byDate[dateStr];
+      const dateLabel = new Date(dateStr+"T00:00:00").toLocaleDateString("ar-EG", { weekday:"long", day:"numeric", month:"long" });
+
+      const rowsHtml = shiftKeysForDisplay.map(k=>{
+        const item = dayItems.find(x=>x.data.shiftKey===k);
+        const color = shiftColor(k);
+        const label = shiftLabelMap[k] || k;
+
+        if(!item || item.data.isMissing){
+          return `
+            <div class="day-eval-row missing-row">
+              <span class="day-eval-color-dot" style="background:${color.ink};"></span>
+              <span class="day-eval-shift-name">${escapeHtml(label)}</span>
+              <span class="stat-pill bad">${ICONS.xCircle} لم يتم التقييم لهذا الشيفت</span>
+              ${item ? `<button class="icon-btn day-eval-delete" data-quickdelete="${item.id}" title="حذف">${ICONS.trash}</button>` : ``}
+            </div>
+          `;
+        }
+
+        const data = item.data;
+        const allTasks = evalSections(data).flatMap(sec=>sec.tasks);
+        const okCount = allTasks.filter(t=>t.status==="done").length;
+        const badCount = allTasks.length - okCount;
+        const timeStr = formatTime(data.submittedAt);
+        return `
+          <div class="day-eval-row" data-id="${item.id}" style="background:${color.soft};">
+            <span class="day-eval-color-dot" style="background:${color.ink};"></span>
+            <div class="day-eval-main">
+              <span class="day-eval-shift-name" style="color:${color.ink};">${escapeHtml(label)}</span>
+              <span class="eval-meta">${timeStr?timeStr+' — ':''}${escapeHtml(data.responsible)}</span>
             </div>
             <div class="eval-stats">
-              ${data.isMissing ? `<span class="stat-pill bad">${ICONS.xCircle} لم يتم تسجيل تقييم</span>` : `
-                ${data.adminScore!=null ? `<span class="stat-pill score-pill">${data.adminScore}%</span>` : ""}
-                <span class="stat-pill ok">${ICONS.checkCircle} ${okCount}</span>
-                ${badCount ? `<span class="stat-pill bad">${ICONS.xCircle} ${badCount}</span>` : ""}
-              `}
+              ${data.adminScore!=null ? `<span class="stat-pill score-pill">${data.adminScore}%</span>` : ""}
+              <span class="stat-pill ok">${ICONS.checkCircle} ${okCount}</span>
+              ${badCount ? `<span class="stat-pill bad">${ICONS.xCircle} ${badCount}</span>` : ""}
             </div>
+            <button class="icon-btn day-eval-delete" data-quickdelete="${item.id}" title="حذف">${ICONS.trash}</button>
           </div>
-          <button class="icon-btn eval-quick-delete" data-quickdelete="${id}" title="حذف التقييم">${ICONS.trash}</button>
-        </div>
+        `;
+      }).join("");
+
+      return `
+        <div class="label-card"><div class="tag-edge"></div><div class="body">
+          <h3 class="section-title" style="margin-bottom:12px;">${dateLabel}</h3>
+          <div class="day-eval-rows">${rowsHtml}</div>
+        </div></div>
       `;
     }).join("");
 
-    list.querySelectorAll(".eval-item").forEach(el=>{
-      el.addEventListener("click", (e)=>{
-        if(e.target.closest(".eval-quick-delete")) return;
-        const item = evalCache.find(x=>x.id===el.getAttribute("data-id"));
+    groupsEl.querySelectorAll(".day-eval-row[data-id]").forEach(row=>{
+      row.addEventListener("click", (e)=>{
+        if(e.target.closest(".day-eval-delete")) return;
+        const item = evalCache.find(x=>x.id===row.getAttribute("data-id"));
         if(item) openEvalDetail(item, container);
       });
     });
 
-    list.querySelectorAll(".eval-quick-delete").forEach(btn=>{
+    groupsEl.querySelectorAll(".day-eval-delete").forEach(btn=>{
       btn.addEventListener("click", async (e)=>{
         e.stopPropagation();
         const id = btn.getAttribute("data-quickdelete");
