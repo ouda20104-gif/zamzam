@@ -338,6 +338,7 @@
   .day-eval-shift-name{font-weight:800;font-size:14px;}
   .day-eval-row.missing-row .day-eval-shift-name{flex:1;}
   .day-eval-delete{flex:none;}
+  .day-eval-subrow{display:flex;align-items:center;gap:8px;margin-top:6px;}
   .label-card.is-missing{border-color:var(--danger);}
   .label-card.is-missing .tag-edge{background:var(--danger);opacity:1;}
   .eval-item .eval-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--accent-soft);color:var(--accent-ink);}
@@ -2014,14 +2015,14 @@
   }
 
   const SHIFT_COLOR_PALETTE = [
-    {soft:'#FBE1DF', ink:'#8C1414'},
-    {soft:'#DCF2E9', ink:'#0F6B4C'},
-    {soft:'#E4E6F7', ink:'#3D4499'},
-    {soft:'#FCEFC7', ink:'#8A6415'},
     {soft:'#EFE7FB', ink:'#5B34A8'},
+    {soft:'#FCEFC7', ink:'#8A6415'},
+    {soft:'#E4E6F7', ink:'#3D4499'},
     {soft:'#D9F2F5', ink:'#146B77'},
     {soft:'#FBE1EE', ink:'#9A2A63'},
-    {soft:'#EAF1D9', ink:'#5C6B2C'}
+    {soft:'#EAF1D9', ink:'#5C6B2C'},
+    {soft:'#DCF2E9', ink:'#0F6B4C'},
+    {soft:'#F5E6D3', ink:'#8A5A2B'}
   ];
   function shiftColor(shiftKey){
     const keys = Object.keys(config.shifts);
@@ -2110,13 +2111,18 @@
             <div class="day-eval-main">
               <span class="day-eval-shift-name" style="color:${color.ink};">${escapeHtml(label)}</span>
               <span class="eval-meta">${timeStr?timeStr+' — ':''}${escapeHtml(data.responsible)}</span>
+              ${badCount===0 ? `
+                <div class="day-eval-subrow">
+                  <span class="stat-pill ok">${ICONS.checkCircle} تمت كل المهام</span>
+                  <button class="icon-btn day-eval-delete" data-quickdelete="${item.id}" title="حذف">${ICONS.trash}</button>
+                </div>
+              ` : ``}
             </div>
             <div class="eval-stats">
               ${data.adminScore!=null ? `<span class="stat-pill score-pill">${data.adminScore}%</span>` : ""}
-              <span class="stat-pill ok">${ICONS.checkCircle} ${okCount}</span>
-              ${badCount ? `<span class="stat-pill bad">${ICONS.xCircle} ${badCount}</span>` : ""}
+              ${badCount>0 ? `<span class="stat-pill ok">${ICONS.checkCircle} ${okCount}</span><span class="stat-pill bad">${ICONS.xCircle} ${badCount}</span>` : ``}
             </div>
-            <button class="icon-btn day-eval-delete" data-quickdelete="${item.id}" title="حذف">${ICONS.trash}</button>
+            ${badCount>0 ? `<button class="icon-btn day-eval-delete" data-quickdelete="${item.id}" title="حذف">${ICONS.trash}</button>` : ``}
           </div>
         `;
       }).join("");
