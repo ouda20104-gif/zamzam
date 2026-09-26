@@ -884,6 +884,14 @@
   async function createMissingRecordAndReturn(shiftKey, dateStr){
     const shift = config.shifts[shiftKey];
     if(!shift) return null;
+    let attribUid = null, attribUsername = null;
+    if(!usingFallback){
+      try{
+        const map = await getShiftEmployeeMap();
+        const attrib = map[shiftKey];
+        if(attrib){ attribUid = attrib.uid; attribUsername = attrib.username; }
+      }catch(e){ /* fall back to unattributed */ }
+    }
     const record = {
       shiftKey,
       shiftLabel: shift.label,
@@ -896,8 +904,8 @@
       notes: [],
       adminScore: 0,
       adminScoreNote: "",
-      submittedByUid: null,
-      submittedByUsername: null,
+      submittedByUid: attribUid,
+      submittedByUsername: attribUsername,
       submittedAt: Date.now()
     };
     if(!usingFallback){
@@ -942,17 +950,24 @@
     }catch(e){ /* best-effort only */ }
   }
 
-  async function runBackfillForAdmin(){
-    if(usingFallback || !authUser) return;
+  async function getShiftEmployeeMap(){
+    const shiftUidMap = {};
     try{
       const usersSnap = await db.collection("users").get();
-      const shiftUidMap = {};
       usersSnap.forEach(doc=>{
         const u = doc.data();
         if(u.status === "approved" && u.shiftKey && !u.isAdmin && !shiftUidMap[u.shiftKey]){
           shiftUidMap[u.shiftKey] = { uid: doc.id, username: u.username||null };
         }
       });
+    }catch(e){ /* best-effort only */ }
+    return shiftUidMap;
+  }
+
+  async function runBackfillForAdmin(){
+    if(usingFallback || !authUser) return;
+    try{
+      const shiftUidMap = await getShiftEmployeeMap();
       for(const shiftKey of Object.keys(config.shifts)){
         try{
           const snap = await EVALS_COL().where("shiftKey","==",shiftKey).get();
