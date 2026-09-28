@@ -2226,6 +2226,142 @@
     document.body.appendChild(lb);
   }
 
+  function openAdminFillForm(item, listContainer){
+    const d = item.data;
+    const shift = config.shifts[d.shiftKey];
+    if(!shift){ toast("هذا الشيفت لم يعد موجودًا في الإعدادات", true); return; }
+
+    const localState = {
+      sections: {},
+      employeeRatings: (shift.employees||[]).map(()=>({stars:0, reason:""})),
+      notes: config.notesFields.map(()=>"")
+    };
+    shift.sections.forEach(sec=>{
+      localState.sections[sec.id] = sec.tasks.map(()=>({status:null, reason:"", amount:"", photo:null}));
+    });
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <h2>تعبئة تقييم كامل — ${escapeHtml(shift.label)}</h2>
+            <div class="eval-meta">${escapeHtml(d.date)} — المسؤول: ${escapeHtml(shift.responsibleName||d.responsible||"—")}</div>
+          </div>
+          <button class="close-x" id="close-fill-modal">${ICONS.close}</button>
+        </div>
+
+        ${shift.sections.map(sec=>`
+          <div class="label-card"><div class="tag-edge"></div><div class="body">
+            <h3 class="section-title"><span class="icon-badge">${sectionIcon(sec)}</span> ${escapeHtml(sec.title)}</h3>
+            <div class="task-list" id="fill-section-${sec.id}">
+              ${sec.tasks.map((t,i)=>taskRowHtml(t, localState.sections[sec.id][i], sec.type)).join("")}
+            </div>
+          </div></div>
+        `).join("")}
+
+        ${(shift.employees && shift.employees.length) ? `
+        <div class="label-card"><div class="tag-edge"></div><div class="body">
+          <h3 class="section-title"><span class="icon-badge">${ICONS.star}</span> تقييم الموظفين في الشيفت</h3>
+          <div id="fill-emp-ratings">
+            ${shift.employees.map((name,i)=>employeeRatingRowHtml(name, localState.employeeRatings[i])).join("")}
+          </div>
+        </div></div>
+        ` : ``}
+
+        <div class="label-card"><div class="tag-edge"></div><div class="body">
+          <h3 class="section-title"><span class="icon-badge">${ICONS.notebook}</span> ملاحظات الشيفت</h3>
+          <div class="notes-grid">
+            ${config.notesFields.map((label,i)=>`
+              <div class="field">
+                <label>${escapeHtml(label)}</label>
+                <textarea data-fill-note="${i}" placeholder="اكتب ملاحظة (اختياري)"></textarea>
+              </div>
+            `).join("")}
+          </div>
+        </div></div>
+
+        <div class="submit-bar">
+          <button class="btn btn-primary" id="save-full-fill">${ICONS.check} حفظ التقييم الكامل</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    backdrop.addEventListener("click", e=>{ if(e.target===backdrop) backdrop.remove(); });
+    backdrop.querySelector("#close-fill-modal").addEventListener("click", ()=>backdrop.remove());
+
+    shift.sections.forEach(sec=>{
+      bindTaskRows(backdrop.querySelector("#fill-section-"+sec.id), localState.sections[sec.id]);
+    });
+    const empListEl = backdrop.querySelector("#fill-emp-ratings");
+    if(empListEl) bindEmployeeRatings(empListEl, localState.employeeRatings);
+    backdrop.querySelectorAll("[data-fill-note]").forEach(el=>{
+      el.addEventListener("input", e=>{ localState.notes[Number(el.getAttribute("data-fill-note"))] = e.target.value; });
+    });
+
+    backdrop.querySelector("#save-full-fill").addEventListener("click", async ()=>{
+      const missing = shift.sections.some(sec => localState.sections[sec.id].some(s => !s.status));
+      if(missing){ toast("من فضلك حدّد حالة كل المهام قبل الحفظ", true); return; }
+
+      const missingPhotoRows = [];
+      shift.sections.forEach(sec=>{
+        const listEl = backdrop.querySelector("#fill-section-"+sec.id);
+        if(!listEl) return;
+        const rows = listEl.querySelectorAll(".task-row");
+        sec.tasks.forEach((t,i)=>{
+          const state = localState.sections[sec.id][i];
+          if(t.allowPhoto && state.status === "done" && !state.photo && rows[i]){
+            missingPhotoRows.push(rows[i]);
+          }
+        });
+      });
+      if(missingPhotoRows.length){
+        toast("لازم ترفع صورة لكل مهمة \"تمّ\" مطلوب فيها صورة قبل الحفظ", true);
+        missingPhotoRows.forEach(row=>{
+          const wrap = row.querySelector(".task-photo-wrap");
+          if(wrap) wrap.classList.add("needs-photo");
+        });
+        missingPhotoRows[0].scrollIntoView({behavior:"smooth", block:"center"});
+        return;
+      }
+
+      const missingStars = (shift.employees||[]).some((name,i)=> !(localState.employeeRatings[i] && localState.employeeRatings[i].stars > 0));
+      if(missingStars){ toast("من فضلك قيّم كل موظف بعدد نجوم قبل الحفظ", true); return; }
+
+      const btn = backdrop.querySelector("#save-full-fill");
+      btn.disabled = true;
+      try{
+        const updatedFields = {
+          isMissing: false,
+          autoGenerated: false,
+          responsible: shift.responsibleName || d.responsible || "",
+          sections: shift.sections.map(sec => ({
+            id: sec.id, title: sec.title, type: sec.type,
+            tasks: sec.tasks.map((t,i)=>({ text:t.text, ...localState.sections[sec.id][i] }))
+          })),
+          employeeRatings: (shift.employees||[]).map((name,i)=>({
+            name, stars: localState.employeeRatings[i].stars, reason: localState.employeeRatings[i].reason
+          })),
+          notes: config.notesFields.map((label,i)=>({label, value: localState.notes[i]}))
+        };
+        if(!usingFallback){
+          try{ await EVALS_COL().doc(item.id).update(updatedFields); }
+          catch(e){ localAdapter.updateEvaluation(item.id, updatedFields); }
+        } else {
+          localAdapter.updateEvaluation(item.id, updatedFields);
+        }
+        Object.assign(item.data, updatedFields);
+        toast("تم حفظ التقييم الكامل");
+        backdrop.remove();
+        drawEvaluationsList(listContainer);
+      }catch(e){
+        btn.disabled = false;
+        toast("تعذّر الحفظ، حاول مرة أخرى", true);
+      }
+    });
+  }
+
   function openEvalDetail(item, listContainer){
     const d = item.data;
     const sections = evalSections(d);
@@ -2279,6 +2415,9 @@
           <div class="storage-note" style="background:var(--danger-soft);border-color:var(--danger);color:var(--danger);">
             ${ICONS.xCircle}
             <span>لم يتم تسجيل تقييم لهذا الشيفت في هذا اليوم — تم إنشاء هذا السجل تلقائيًا لتوثيق الغياب.</span>
+          </div>
+          <div class="submit-bar" style="margin-bottom:16px;">
+            <button class="btn btn-primary btn-small" id="fill-full-day">${ICONS.list} تعبئة التقييم الكامل لهذا اليوم</button>
           </div>
         ` : ``}
         ${sectionsHtml}
@@ -2334,6 +2473,14 @@
         toast("تعذّر حفظ الدرجة، حاول مرة أخرى", true);
       }
     });
+
+    const fillBtn = backdrop.querySelector("#fill-full-day");
+    if(fillBtn){
+      fillBtn.addEventListener("click", ()=>{
+        backdrop.remove();
+        openAdminFillForm(item, listContainer);
+      });
+    }
 
     backdrop.querySelector("#delete-eval").addEventListener("click", async ()=>{
       if(!confirm("هل تريد حذف هذا التقييم نهائيًا؟")) return;
@@ -2437,11 +2584,42 @@
   }
 
   function drawMyRatings(items){
-    if(items.length === 0){
-      view.innerHTML = `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لسه معملتش أي تقييم.</p></div>`;
-      return;
+    const month = drawMyRatings._month || todayISO().slice(0,7);
+    drawMyRatings._month = month;
+
+    const filtersHtml = `
+      <div class="eval-filters">
+        ${ICONS.filter}
+        <input type="month" id="myratings-month" value="${month}">
+      </div>
+    `;
+
+    const monthItems = items.filter(({data})=> (data.date||"").slice(0,7) === month);
+    const scoredItems = monthItems.filter(({data})=> data.adminScore != null);
+
+    let summaryHtml;
+    if(scoredItems.length){
+      const avg = Math.round(scoredItems.reduce((s,{data})=>s+data.adminScore,0) / scoredItems.length);
+      const grade = scoreToGrade(avg);
+      summaryHtml = `
+        <div class="label-card"><div class="tag-edge"></div><div class="body">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <h3 class="section-title" style="margin:0;"><span class="icon-badge">${ICONS.star}</span> متوسط أدائك هذا الشهر</h3>
+            <span class="grade-badge ${grade.cls}">${avg}% — ${grade.label}</span>
+          </div>
+          <p class="section-hint" style="padding-right:0;margin-top:10px;">${scoredItems.length} من أصل ${monthItems.length} يوم تم تقييمهم هذا الشهر.</p>
+        </div></div>
+      `;
+    } else {
+      summaryHtml = `
+        <div class="label-card"><div class="tag-edge"></div><div class="body">
+          <h3 class="section-title" style="margin:0;"><span class="icon-badge">${ICONS.star}</span> متوسط أدائك هذا الشهر</h3>
+          <p class="section-hint" style="padding-right:0;margin-top:10px;">لسه مفيش أيام مُقيَّمة في الشهر ده.</p>
+        </div></div>
+      `;
     }
-    view.innerHTML = items.map(({data}, i)=>{
+
+    const cardsHtml = monthItems.length ? monthItems.map(({data}, i)=>{
       const timeStr = formatTime(data.submittedAt);
       const scored = data.adminScore != null;
       const grade = scored ? scoreToGrade(data.adminScore) : null;
@@ -2456,16 +2634,23 @@
               ? `<span class="stat-pill bad">${ICONS.xCircle} لم يتم تسجيل التقييم</span>`
               : (scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : `<span class="stat-pill" style="background:var(--bg);color:var(--muted);">لسه ما اتقيّمش</span>`)}
           </div>
-          ${data.isMissing ? `<p class="section-hint" style="padding-right:0;margin-top:10px;color:var(--danger);">تم تسجيل هذا اليوم تلقائيًا كغياب لعدم إدخال تقييم في وقته.</p>` : ``}
+          ${data.isMissing ? `<p class="section-hint" style="padding-right:0;margin-top:10px;color:var(--danger);">اليوم ده ما اتعملش فيه تقييم${data.adminScore!=null?` — درجته المسجّلة ${data.adminScore}%`:''}.</p>` : ``}
           ${data.adminScoreNote ? `<p class="section-hint" style="padding-right:0;margin-top:10px;"><strong>ملحوظة المدير:</strong> ${escapeHtml(data.adminScoreNote)}</p>` : ``}
           ${scored ? `<p class="section-hint" style="padding-right:0;margin-top:8px;">${ICONS.star} دوس هنا عشان تشوف رد فعلنا على درجتك 😄</p>` : ``}
         </div></div>
       `;
-    }).join("");
+    }).join("") : `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لا توجد أيام في الشهر ده.</p></div>`;
+
+    view.innerHTML = filtersHtml + summaryHtml + cardsHtml;
+
+    document.getElementById("myratings-month").addEventListener("change", e=>{
+      drawMyRatings._month = e.target.value;
+      drawMyRatings(items);
+    });
 
     view.querySelectorAll(".label-card.clickable-score").forEach(card=>{
       card.addEventListener("click", ()=>{
-        const item = items[Number(card.getAttribute("data-idx"))];
+        const item = monthItems[Number(card.getAttribute("data-idx"))];
         if(item) openScoreReaction(item.data);
       });
     });
