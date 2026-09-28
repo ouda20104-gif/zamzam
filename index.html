@@ -819,13 +819,14 @@
     localAdapter.deleteEvaluation(id);
   }
 
-  async function updateEvaluationScore(id, score, note){
-    const fields = { adminScore: score, adminScoreNote: note };
+  async function updateEvaluationScore(id, score, note, extra){
+    const fields = Object.assign({ adminScore: score, adminScoreNote: note, adminScoredAt: Date.now() }, extra || {});
     if(!usingFallback){
-      try{ await withTimeout(EVALS_COL().doc(id).update(fields), 12000); return; }
+      try{ await withTimeout(EVALS_COL().doc(id).update(fields), 12000); return fields; }
       catch(e){ /* transient failure — fall through to local update for this call only */ }
     }
     localAdapter.updateEvaluation(id, fields);
+    return fields;
   }
 
   /* ================= Auto-fill missed daily reports ================= */
@@ -989,9 +990,17 @@
         try{
           const snap = await EVALS_COL().where("shiftKey","==",shiftKey).get();
           const dates = new Set();
-          snap.forEach(doc=>{ const d = doc.data().date; if(d) dates.add(d); });
-          const deletedDates = await getDeletedDaysSet(shiftKey);
           const attrib = shiftUidMap[shiftKey] || {};
+          const repairs = [];
+          snap.forEach(doc=>{
+            const dd = doc.data();
+            if(dd.date) dates.add(dd.date);
+            if(dd.isMissing && !dd.submittedByUid && attrib.uid){
+              repairs.push(doc.ref.update({ submittedByUid: attrib.uid, submittedByUsername: attrib.username||null }).catch(()=>{}));
+            }
+          });
+          await Promise.all(repairs);
+          const deletedDates = await getDeletedDaysSet(shiftKey);
           await backfillGapsForShift(shiftKey, dates, attrib.uid||null, attrib.username||null, deletedDates, attrib.since||null);
         }catch(e){ /* continue with next shift */ }
       }
@@ -2202,7 +2211,7 @@
               <span class="day-eval-shift-name" ${data.isMissing?'':`style="color:${color.ink};"`}>${escapeHtml(label)}</span>
               <span class="eval-meta">${escapeHtml(data.responsible)}${timeStr?' — '+timeStr:''}</span>
               <div class="day-eval-stats-row">
-                ${data.isMissing ? `<span class="stat-pill bad">${ICONS.xCircle} لم يتم التقييم لهذا الشيفت — دوس للتقييم</span>` : `
+                ${data.isMissing ? `<span class="stat-pill bad">${ICONS.xCircle} ${data.adminScoredAt ? "لم يتم إدخال تقييم" : "لم يتم التقييم لهذا الشيفت — دوس للتقييم"}</span>${data.adminScore!=null ? `<span class="stat-pill score-pill">${data.adminScore}%${data.adminScoredAt ? " (قيّمته)" : ""}</span>` : ``}` : `
                   <span class="stat-pill ok">${ICONS.checkCircle} ${okCount}</span>
                   ${badCount ? `<span class="stat-pill bad">${ICONS.xCircle} ${badCount}</span>` : ``}
                   ${data.adminScore!=null ? `<span class="stat-pill score-pill">${data.adminScore}%</span>` : ``}
@@ -2505,9 +2514,14 @@
       const btn = document.getElementById("save-score");
       btn.disabled = true;
       try{
-        await updateEvaluationScore(item.id, score, note);
-        item.data.adminScore = score;
-        item.data.adminScoreNote = note;
+        let extra = {};
+        if(d.isMissing && !d.submittedByUid && !usingFallback){
+          // make sure the day shows up in the employee's own "تقييماتي"
+          const emp = (await getShiftEmployeeMap())[d.shiftKey];
+          if(emp){ extra = { submittedByUid: emp.uid, submittedByUsername: emp.username }; }
+        }
+        const saved = await updateEvaluationScore(item.id, score, note, extra);
+        Object.assign(item.data, saved);
         toast("تم حفظ الدرجة");
         backdrop.remove();
         drawEvaluationsList(listContainer);
@@ -2677,10 +2691,10 @@
               <div class="eval-meta">${escapeHtml(data.date)}${timeStr?' — '+timeStr:''}</div>
             </div>
             ${data.isMissing
-              ? `<span class="stat-pill bad">${ICONS.xCircle} لم يتم تسجيل التقييم</span>`
+              ? `<span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><span class="stat-pill bad">${ICONS.xCircle} لم يتم إدخال تقييم</span>${scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : ``}</span>`
               : (scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : `<span class="stat-pill" style="background:var(--bg);color:var(--muted);">لسه ما اتقيّمش</span>`)}
           </div>
-          ${data.isMissing ? `<p class="section-hint" style="padding-right:0;margin-top:10px;color:var(--danger);">اليوم ده ما اتعملش فيه تقييم${data.adminScore!=null?` — درجته المسجّلة ${data.adminScore}%`:''}.</p>` : ``}
+          ${data.isMissing ? `<p class="section-hint" style="padding-right:0;margin-top:10px;color:var(--danger);">${data.adminScoredAt ? `اليوم ده ما اتدخلش فيه تقييم، والمدير قيّمه بـ ${data.adminScore}%.` : `اليوم ده ما اتدخلش فيه تقييم، فالمدير قيّمه بصفر (٠%) وداخل في متوسطك الشهري.`}</p>` : ``}
           ${data.adminScoreNote ? `<p class="section-hint" style="padding-right:0;margin-top:10px;"><strong>ملحوظة المدير:</strong> ${escapeHtml(data.adminScoreNote)}</p>` : ``}
           ${scored ? `<p class="section-hint" style="padding-right:0;margin-top:8px;">${ICONS.star} دوس هنا عشان تشوف رد فعلنا على درجتك 😄</p>` : ``}
         </div></div>
