@@ -839,7 +839,7 @@
     return `${yy}-${mm}-${dd}`;
   }
 
-  const BACKFILL_MAX_DAYS = 14; // don't backfill further back than this, to avoid runaway writes
+  const BACKFILL_MAX_DAYS = 45; // don't backfill further back than this, to avoid runaway writes
 
   async function markDayDeleted(shiftKey, dateStr){
     if(usingFallback) return;
@@ -861,8 +861,16 @@
   async function createMissingRecord(shiftKey, dateStr, attributedUid, attributedUsername){
     const shift = config.shifts[shiftKey];
     if(!shift) return;
+    const isAdmin = !!(authProfile && authProfile.isAdmin);
     try{
-      await EVALS_COL().add({
+      // Deterministic id => the same shift+day can never be created twice.
+      const ref = EVALS_COL().doc("missing_"+shiftKey+"_"+dateStr);
+      if(isAdmin){
+        const snap = await ref.get();
+        if(snap.exists) return;
+      }
+      // (for non-admins, set() on an already-existing doc is rejected by the rules, which is what we want)
+      await ref.set({
         shiftKey,
         shiftLabel: shift.label,
         date: dateStr,
@@ -910,7 +918,10 @@
     };
     if(!usingFallback){
       try{
-        const ref = await EVALS_COL().add(record);
+        const ref = EVALS_COL().doc("missing_"+shiftKey+"_"+dateStr);
+        const snap = await ref.get();
+        if(snap.exists) return { id: ref.id, data: snap.data() };
+        await ref.set(record);
         return { id: ref.id, data: record };
       }catch(e){ /* fall through to local */ }
     }
@@ -918,14 +929,19 @@
     return { id, data: record };
   }
 
-  async function backfillGapsForShift(shiftKey, existingDates, attributedUid, attributedUsername, deletedDates){
+  async function backfillGapsForShift(shiftKey, existingDates, attributedUid, attributedUsername, deletedDates, sinceMs){
     const todayStr = todayISO();
     const yesterdayStr = addDaysToDateStr(todayStr, -1);
     let startStr = addDaysToDateStr(todayStr, -BACKFILL_MAX_DAYS);
-    if(existingDates.size){
-      const maxDate = [...existingDates].sort().pop();
-      const dayAfterMax = addDaysToDateStr(maxDate, 1);
-      if(dayAfterMax > startStr) startStr = dayAfterMax;
+    if(sinceMs){
+      // never mark days from before the employee was approved as "missing"
+      const firstFullDay = addDaysToDateStr(dateToISO(new Date(sinceMs)), 1);
+      if(firstFullDay > startStr) startStr = firstFullDay;
+    } else if(existingDates.size){
+      const minDate = [...existingDates].sort()[0];
+      if(minDate > startStr) startStr = minDate;
+    } else {
+      return; // nothing tells us when this shift started, so don't invent absence days
     }
     if(startStr > yesterdayStr) return;
     let cur = startStr;
@@ -946,7 +962,8 @@
       const dates = new Set();
       snap.forEach(doc=>{ const d = doc.data().date; if(d) dates.add(d); });
       const deletedDates = await getDeletedDaysSet(shiftKey);
-      await backfillGapsForShift(shiftKey, dates, authUser.uid, authProfile.username||null, deletedDates);
+      const sinceMs = authProfile.approvedAt || authProfile.createdAt || null;
+      await backfillGapsForShift(shiftKey, dates, authUser.uid, authProfile.username||null, deletedDates, sinceMs);
     }catch(e){ /* best-effort only */ }
   }
 
@@ -957,7 +974,7 @@
       usersSnap.forEach(doc=>{
         const u = doc.data();
         if(u.status === "approved" && u.shiftKey && !u.isAdmin && !shiftUidMap[u.shiftKey]){
-          shiftUidMap[u.shiftKey] = { uid: doc.id, username: u.username||null };
+          shiftUidMap[u.shiftKey] = { uid: doc.id, username: u.username||null, since: u.approvedAt || u.createdAt || null };
         }
       });
     }catch(e){ /* best-effort only */ }
@@ -975,7 +992,7 @@
           snap.forEach(doc=>{ const d = doc.data().date; if(d) dates.add(d); });
           const deletedDates = await getDeletedDaysSet(shiftKey);
           const attrib = shiftUidMap[shiftKey] || {};
-          await backfillGapsForShift(shiftKey, dates, attrib.uid||null, attrib.username||null, deletedDates);
+          await backfillGapsForShift(shiftKey, dates, attrib.uid||null, attrib.username||null, deletedDates, attrib.since||null);
         }catch(e){ /* continue with next shift */ }
       }
     }catch(e){ /* best-effort only */ }
@@ -1011,13 +1028,13 @@
     setTimeout(()=>toastEl.classList.remove("show"), 2400);
   }
 
-  function todayISO(){
-    const d = new Date();
+  function dateToISO(d){
     const y = d.getFullYear();
     const m = String(d.getMonth()+1).padStart(2,"0");
     const day = String(d.getDate()).padStart(2,"0");
     return `${y}-${m}-${day}`;
   }
+  function todayISO(){ return dateToISO(new Date()); }
 
   function formatTime(ts){
     if(!ts) return "";
@@ -1602,7 +1619,7 @@
       btn.addEventListener("click", async ()=>{
         const uid = btn.getAttribute("data-approve");
         try{
-          await updateUserFields(uid, { status: "approved", shiftKey: currentShiftFor(uid) });
+          await updateUserFields(uid, { status: "approved", shiftKey: currentShiftFor(uid), approvedAt: Date.now() });
           toast("تمت الموافقة على الحساب");
           renderUsersAdmin(container);
         }catch(e){ toast("تعذّر تنفيذ العملية", true); }
@@ -2114,7 +2131,19 @@
       byDate[d].push(item);
     });
 
-    const dateKeys = Object.keys(byDate).sort().reverse();
+    const todayStr = todayISO();
+    const allDates = evalCache.map(x=>x.data.date).filter(Boolean).sort();
+    const firstDate = allDates[0];
+    const dateSet = new Set(Object.keys(byDate));
+    if(firstDate){
+      const [yy, mm] = month.split("-").map(Number);
+      const daysInMonth = new Date(yy, mm, 0).getDate();
+      for(let dd=1; dd<=daysInMonth; dd++){
+        const ds = `${month}-${String(dd).padStart(2,"0")}`;
+        if(ds >= firstDate && ds <= todayStr) dateSet.add(ds);
+      }
+    }
+    const dateKeys = [...dateSet].sort().reverse();
 
     if(dateKeys.length === 0){
       groupsEl.innerHTML = `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لا توجد تقييمات في هذا الشهر.</p></div>`;
@@ -2124,13 +2153,27 @@
     const shiftKeysForDisplay = shiftFilter === "all" ? Object.keys(config.shifts) : [shiftFilter];
 
     groupsEl.innerHTML = dateKeys.map(dateStr=>{
-      const dayItems = byDate[dateStr];
+      const dayItems = byDate[dateStr] || [];
       const dateLabel = new Date(dateStr+"T00:00:00").toLocaleDateString("ar-EG", { weekday:"long", day:"numeric", month:"long" });
 
       const rowsHtml = shiftKeysForDisplay.map(k=>{
         const item = dayItems.find(x=>x.data.shiftKey===k);
         const color = shiftColor(k);
         const label = shiftLabelMap[k] || k;
+
+        if(!item && dateStr === todayStr){
+          return `
+            <div class="day-eval-row" style="background:var(--bg);border-color:var(--border);cursor:default;">
+              <span class="day-eval-color-dot" style="background:${color.ink};"></span>
+              <div class="day-eval-main">
+                <span class="day-eval-shift-name">${escapeHtml(label)}</span>
+                <div class="day-eval-stats-row">
+                  <span class="stat-pill" style="background:#fff;color:var(--muted);">${ICONS.clock} اليوم لسه مفتوح — في انتظار التقييم</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }
 
         if(!item){
           return `
@@ -2542,7 +2585,10 @@
   async function renderMyRatings(){
     view.innerHTML = `<div class="empty-state"><p>جارٍ التحميل...</p></div>`;
     let items;
-    try{ items = await listMyEvaluations(authUser.uid); }
+    try{
+      if(authProfile && !authProfile.isAdmin){ await runBackfillForEmployee(); }
+      items = await listMyEvaluations(authUser.uid);
+    }
     catch(e){ view.innerHTML = `<div class="empty-state"><p>تعذّر تحميل التقييمات. حاول تحديث الصفحة.</p></div>`; return; }
     drawMyRatings(items);
   }
