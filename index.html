@@ -934,15 +934,9 @@
     const todayStr = todayISO();
     const yesterdayStr = addDaysToDateStr(todayStr, -1);
     let startStr = addDaysToDateStr(todayStr, -BACKFILL_MAX_DAYS);
-    if(sinceMs){
-      // never mark days from before the employee was approved as "missing"
-      const firstFullDay = addDaysToDateStr(dateToISO(new Date(sinceMs)), 1);
-      if(firstFullDay > startStr) startStr = firstFullDay;
-    } else if(existingDates.size){
+    if(existingDates.size){
       const minDate = [...existingDates].sort()[0];
-      if(minDate > startStr) startStr = minDate;
-    } else {
-      return; // nothing tells us when this shift started, so don't invent absence days
+      if(minDate < startStr) startStr = minDate;
     }
     if(startStr > yesterdayStr) return;
     let cur = startStr;
