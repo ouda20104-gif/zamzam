@@ -2638,73 +2638,79 @@
   }
 
   function drawMyRatings(items){
-    const month = drawMyRatings._month || todayISO().slice(0,7);
-    drawMyRatings._month = month;
-
-    const filtersHtml = `
-      <div class="eval-filters">
-        ${ICONS.filter}
-        <input type="month" id="myratings-month" value="${month}">
-      </div>
-    `;
-
-    const monthItems = items.filter(({data})=> (data.date||"").slice(0,7) === month);
-    const scoredItems = monthItems.filter(({data})=> data.adminScore != null);
-
-    let summaryHtml;
-    if(scoredItems.length){
-      const avg = Math.round(scoredItems.reduce((s,{data})=>s+data.adminScore,0) / scoredItems.length);
-      const grade = scoreToGrade(avg);
-      summaryHtml = `
-        <div class="label-card"><div class="tag-edge"></div><div class="body">
-          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-            <h3 class="section-title" style="margin:0;"><span class="icon-badge">${ICONS.star}</span> متوسط أدائك هذا الشهر</h3>
-            <span class="grade-badge ${grade.cls}">${avg}% — ${grade.label}</span>
-          </div>
-          <p class="section-hint" style="padding-right:0;margin-top:10px;">${scoredItems.length} من أصل ${monthItems.length} يوم تم تقييمهم هذا الشهر.</p>
-        </div></div>
-      `;
-    } else {
-      summaryHtml = `
-        <div class="label-card"><div class="tag-edge"></div><div class="body">
-          <h3 class="section-title" style="margin:0;"><span class="icon-badge">${ICONS.star}</span> متوسط أدائك هذا الشهر</h3>
-          <p class="section-hint" style="padding-right:0;margin-top:10px;">لسه مفيش أيام مُقيَّمة في الشهر ده.</p>
-        </div></div>
-      `;
+    if(items.length === 0){
+      view.innerHTML = `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لسه معملتش أي تقييم.</p></div>`;
+      return;
     }
 
-    const cardsHtml = monthItems.length ? monthItems.map(({data}, i)=>{
-      const timeStr = formatTime(data.submittedAt);
-      const scored = data.adminScore != null;
-      const grade = scored ? scoreToGrade(data.adminScore) : null;
-      return `
-        <div class="label-card ${data.isMissing?'is-missing':''} ${scored?'clickable-score':''}" data-idx="${i}"><div class="tag-edge"></div><div class="body">
-          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-            <div>
-              <span class="eval-badge ${data.shiftKey}">${escapeHtml(data.shiftLabel)}</span>
-              <div class="eval-meta">${escapeHtml(data.date)}${timeStr?' — '+timeStr:''}</div>
-            </div>
-            ${data.isMissing
-              ? `<span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><span class="stat-pill bad">${ICONS.xCircle} لم يتم إدخال تقييم</span>${scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : ``}</span>`
-              : (scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : `<span class="stat-pill" style="background:var(--bg);color:var(--muted);">لسه ما اتقيّمش</span>`)}
-          </div>
-          ${data.isMissing ? `<p class="section-hint" style="padding-right:0;margin-top:10px;color:var(--danger);">${data.adminScoredAt ? `اليوم ده ما اتدخلش فيه تقييم، والمدير قيّمه بـ ${data.adminScore}%.` : `اليوم ده ما اتدخلش فيه تقييم، فالمدير قيّمه بصفر (٠%) وداخل في متوسطك الشهري.`}</p>` : ``}
-          ${data.adminScoreNote ? `<p class="section-hint" style="padding-right:0;margin-top:10px;"><strong>ملحوظة المدير:</strong> ${escapeHtml(data.adminScoreNote)}</p>` : ``}
-          ${scored ? `<p class="section-hint" style="padding-right:0;margin-top:8px;">${ICONS.star} دوس هنا عشان تشوف رد فعلنا على درجتك 😄</p>` : ``}
-        </div></div>
-      `;
-    }).join("") : `<div class="empty-state"><div class="mark">${ICONS.clipboard}</div><p>لا توجد أيام في الشهر ده.</p></div>`;
-
-    view.innerHTML = filtersHtml + summaryHtml + cardsHtml;
-
-    document.getElementById("myratings-month").addEventListener("change", e=>{
-      drawMyRatings._month = e.target.value;
-      drawMyRatings(items);
+    const byMonth = {};
+    items.forEach(item=>{
+      const m = (item.data.date||"").slice(0,7);
+      if(!byMonth[m]) byMonth[m] = [];
+      byMonth[m].push(item);
     });
+    const monthKeys = Object.keys(byMonth).sort().reverse();
+
+    const flatItems = [];
+    let html = "";
+
+    monthKeys.forEach(monthKey=>{
+      const monthItems = byMonth[monthKey].slice().sort((a,b)=> (b.data.date||"").localeCompare(a.data.date||""));
+      const scoredItems = monthItems.filter(({data})=> data.adminScore != null);
+      const monthLabel = new Date(monthKey+"-01T00:00:00").toLocaleDateString("ar-EG", { year:"numeric", month:"long" });
+
+      if(scoredItems.length){
+        const avg = Math.round(scoredItems.reduce((s,{data})=>s+data.adminScore,0) / scoredItems.length);
+        const grade = scoreToGrade(avg);
+        html += `
+          <div class="label-card"><div class="tag-edge"></div><div class="body">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+              <h3 class="section-title" style="margin:0;"><span class="icon-badge">${ICONS.star}</span> ${monthLabel}</h3>
+              <span class="grade-badge ${grade.cls}">${avg}% — ${grade.label}</span>
+            </div>
+            <p class="section-hint" style="padding-right:0;margin-top:10px;">${scoredItems.length} من أصل ${monthItems.length} يوم تم تقييمهم.</p>
+          </div></div>
+        `;
+      } else {
+        html += `
+          <div class="label-card"><div class="tag-edge"></div><div class="body">
+            <h3 class="section-title" style="margin:0;"><span class="icon-badge">${ICONS.star}</span> ${monthLabel}</h3>
+            <p class="section-hint" style="padding-right:0;margin-top:10px;">لسه مفيش أيام مُقيَّمة في الشهر ده.</p>
+          </div></div>
+        `;
+      }
+
+      monthItems.forEach(entry=>{
+        const data = entry.data;
+        const idx = flatItems.length;
+        flatItems.push(entry);
+        const timeStr = formatTime(data.submittedAt);
+        const scored = data.adminScore != null;
+        const grade = scored ? scoreToGrade(data.adminScore) : null;
+        html += `
+          <div class="label-card ${data.isMissing?'is-missing':''} ${scored?'clickable-score':''}" data-idx="${idx}"><div class="tag-edge"></div><div class="body">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+              <div>
+                <span class="eval-badge ${data.shiftKey}">${escapeHtml(data.shiftLabel)}</span>
+                <div class="eval-meta">${escapeHtml(data.date)}${timeStr?' — '+timeStr:''}</div>
+              </div>
+              ${data.isMissing
+                ? `<span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><span class="stat-pill bad">${ICONS.xCircle} لم يتم إدخال تقييم</span>${scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : ``}</span>`
+                : (scored ? `<span class="grade-badge ${grade.cls}">${data.adminScore}% — ${grade.label}</span>` : `<span class="stat-pill" style="background:var(--bg);color:var(--muted);">لسه ما اتقيّمش</span>`)}
+            </div>
+            ${data.isMissing ? `<p class="section-hint" style="padding-right:0;margin-top:10px;color:var(--danger);">${data.adminScoredAt ? `اليوم ده ما اتدخلش فيه تقييم، والمدير قيّمه بـ ${data.adminScore}%.` : `اليوم ده ما اتدخلش فيه تقييم، فالمدير قيّمه بصفر (٠%) وداخل في متوسطك الشهري.`}</p>` : ``}
+            ${data.adminScoreNote ? `<p class="section-hint" style="padding-right:0;margin-top:10px;"><strong>ملحوظة المدير:</strong> ${escapeHtml(data.adminScoreNote)}</p>` : ``}
+            ${scored ? `<p class="section-hint" style="padding-right:0;margin-top:8px;">${ICONS.star} دوس هنا عشان تشوف رد فعلنا على درجتك 😄</p>` : ``}
+          </div></div>
+        `;
+      });
+    });
+
+    view.innerHTML = html;
 
     view.querySelectorAll(".label-card.clickable-score").forEach(card=>{
       card.addEventListener("click", ()=>{
-        const item = monthItems[Number(card.getAttribute("data-idx"))];
+        const item = flatItems[Number(card.getAttribute("data-idx"))];
         if(item) openScoreReaction(item.data);
       });
     });
